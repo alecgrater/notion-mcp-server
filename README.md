@@ -206,7 +206,7 @@ uv run notion-mcp-server
 Run basic functionality tests to verify the page mapping system is properly set up:
 
 ```bash
-uv run python tests/test_basic.py
+uv run pytest tests/test_basic_pytest.py -v
 ```
 
 This will test:
@@ -219,7 +219,7 @@ This will test:
 Test with your actual Notion workspace (requires `NOTION_TOKEN` environment variable):
 
 ```bash
-uv run python tests/test_page_mapper.py
+uv run pytest tests/test_page_mapper_pytest.py -v
 ```
 
 This will:
@@ -227,6 +227,17 @@ This will:
 - Fetch and map all pages with hierarchy
 - Test caching functionality
 - Verify search and discovery features
+
+#### Run All Tests
+
+To run all tests at once:
+```bash
+uv run pytest tests/ -v
+```
+
+#### VSCode Integration
+
+The tests are now pytest-compatible and should work directly in VSCode's testing interface. Make sure VSCode is using the correct Python interpreter (`.venv/bin/python`) for the project.
 
 #### MCP Inspector
 
