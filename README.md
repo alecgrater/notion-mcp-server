@@ -6,18 +6,41 @@ A Model Context Protocol (MCP) server that provides access to your Notion worksp
 
 - **Natural Language Queries**: Ask questions in plain English about any content in your Notion workspace
 - **Comprehensive Search**: Searches through your entire Notion workspace, not just a subset
+- **Page Hierarchy Mapping**: Automatically discovers and maps all pages with their hierarchical relationships
+- **Intelligent Caching**: Caches page mappings to reduce API calls and improve performance
 - **Rich Content Retrieval**: Gets full content from the most relevant pages with proper formatting
 - **Source Citations**: Always includes links back to the original Notion pages
 - **Rich Text Support**: Handles various Notion block types including headings, lists, code blocks, and more
+- **Advanced Page Discovery**: Find pages by title, path, or hierarchical structure
 
 ## How It Works
 
-The server provides a single tool called `ask-notion` that:
+### Page Hierarchy Mapping
+
+The server automatically builds a comprehensive map of your entire Notion workspace:
+
+1. **Discovery**: Fetches all pages and databases from your workspace
+2. **Hierarchy Building**: Constructs parent-child relationships between pages
+3. **Path Mapping**: Creates full paths from root to each page (e.g., "Projects > Q4 Planning > Meeting Notes")
+4. **Intelligent Caching**: Stores mappings in `src/notion_mcp_server/resources/page_cache.json` with configurable expiration
+5. **Runtime Updates**: Automatically refreshes cache when pages are created or updated
+
+### Query Processing
+
+The server provides multiple tools for interacting with your Notion content:
+
+**ask-notion**: Natural language queries
 1. Takes your natural language question
 2. Searches through your entire Notion workspace for relevant content
 3. Retrieves full content from the most relevant pages
 4. Combines the information into a comprehensive answer
 5. Provides source links to all pages used in the response
+
+**Additional Tools**: Page management and discovery
+- `list-notion-pages`: Browse all pages with hierarchical structure
+- `find-notion-page`: Find specific pages by title or path
+- `write-to-notion`: Create or update pages (with automatic cache refresh)
+- `refresh-notion-cache`: Manually refresh the page mapping cache
 
 ## Components
 
@@ -30,13 +53,34 @@ The server exposes Notion pages as resources with a custom `notion://` URI schem
 
 ### Tools
 
-The server implements one main tool:
+The server implements several tools for comprehensive Notion interaction:
 
 **ask-notion**: Ask any question about your Notion content
 - Takes a natural language question as input
 - Searches your entire Notion workspace for relevant information
 - Returns a comprehensive answer with source citations
 - Optionally limits the number of pages to include full content from (default: 5 most relevant)
+
+**write-to-notion**: Create or update Notion pages
+- Create new pages at the workspace level or under specific parent pages
+- Update existing pages by ID
+- Supports markdown formatting for content
+- Automatically refreshes page mapping cache after changes
+
+**list-notion-pages**: Browse your workspace structure
+- Lists all pages with hierarchical indentation
+- Filter by depth, archived status, and other criteria
+- Shows page IDs, paths, and URLs for easy reference
+
+**find-notion-page**: Locate specific pages
+- Search by exact or fuzzy title matching
+- Find pages by hierarchical path (e.g., ["Projects", "Q4 Planning"])
+- Returns detailed page information including full path and metadata
+
+**refresh-notion-cache**: Update page mappings
+- Forces a refresh of the cached page hierarchy
+- Useful when pages have been added/modified outside the server
+- Provides summary statistics about your workspace structure
 
 ## Setup
 
@@ -157,13 +201,42 @@ uv run notion-mcp-server
 
 ### Testing
 
-You can test the server using the MCP Inspector:
+#### Basic Tests
+
+Run basic functionality tests to verify the page mapping system is properly set up:
+
+```bash
+uv run python tests/test_basic.py
+```
+
+This will test:
+- Module imports and dependencies
+- Page data structure creation
+- Resources folder and cache file existence
+
+#### Integration Tests
+
+Test with your actual Notion workspace (requires `NOTION_TOKEN` environment variable):
+
+```bash
+uv run python tests/test_page_mapper.py
+```
+
+This will:
+- Connect to your Notion workspace
+- Fetch and map all pages with hierarchy
+- Test caching functionality
+- Verify search and discovery features
+
+#### MCP Inspector
+
+You can also test the server using the MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector uv --directory . run notion-mcp-server
 ```
 
-This will open a web interface where you can test the server's tools and resources.
+This will open a web interface where you can test the server's tools and resources interactively.
 
 ### Building and Publishing
 

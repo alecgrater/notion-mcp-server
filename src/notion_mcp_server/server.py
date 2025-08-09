@@ -12,6 +12,8 @@ from notion_client import Client
 from notion_client.errors import APIResponseError
 from dotenv import load_dotenv
 
+from .page_mapper import NotionPageMapper
+
 # Load environment variables
 load_dotenv()
 
@@ -22,51 +24,34 @@ if not notion_token:
 
 notion = Client(auth=notion_token)
 
+# Initialize page mapper
+page_mapper = NotionPageMapper(notion)
+
 server = Server("notion-mcp-server")
 
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
     """
-    List available Notion resources.
-    This will search for recent pages and databases that the integration has access to.
+    List available Notion resources using the page mapper.
     """
     try:
-        # Search for pages and databases
-        search_results = notion.search(
-            filter={"property": "object", "value": "page"},
-            page_size=20
-        )
+        # Get all pages from the page mapper
+        all_pages = await page_mapper.get_all_pages()
         
         resources = []
-        for result in search_results.get("results", []):
-            page_id = result["id"]
-            
-            # Get page title
-            title = "Untitled"
-            if result.get("properties"):
-                # For database pages, look for title property
-                for prop_name, prop_data in result["properties"].items():
-                    if prop_data.get("type") == "title" and prop_data.get("title"):
-                        title_parts = [t.get("plain_text", "") for t in prop_data["title"]]
-                        title = "".join(title_parts) or "Untitled"
-                        break
-            elif result.get("object") == "page" and result.get("parent", {}).get("type") == "workspace":
-                # For top-level pages, get title from properties
-                if result.get("properties", {}).get("title", {}).get("title"):
-                    title_parts = [t.get("plain_text", "") for t in result["properties"]["title"]["title"]]
-                    title = "".join(title_parts) or "Untitled"
-            
-            resources.append(
-                types.Resource(
-                    uri=AnyUrl(f"notion://page/{page_id}"),
-                    name=f"Notion Page: {title}",
-                    description=f"Notion page: {title}",
-                    mimeType="text/plain",
+        for page in all_pages.values():
+            if not page.archived:  # Only show non-archived pages
+                resources.append(
+                    types.Resource(
+                        uri=AnyUrl(f"notion://page/{page.id}"),
+                        name=f"Notion Page: {page.title}",
+                        description=f"Notion page: {page.title}",
+                        mimeType="text/plain",
+                    )
                 )
-            )
         
         return resources
-    except APIResponseError as e:
+    except Exception as e:
         print(f"Error listing Notion resources: {e}")
         return []
 
@@ -320,6 +305,64 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["title", "content"],
             },
         ),
+        types.Tool(
+            name="list-notion-pages",
+            description="List all pages in your Notion workspace with hierarchical structure",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "show_hierarchy": {
+                        "type": "boolean",
+                        "description": "Show hierarchical structure with indentation (default: true)",
+                        "default": True
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include archived pages (default: false)",
+                        "default": False
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum depth to show (default: unlimited)",
+                        "minimum": 0
+                    }
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="find-notion-page",
+            description="Find a specific Notion page by title or path",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the page to find"
+                    },
+                    "path": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Path hierarchy to the page (e.g., ['Parent Page', 'Child Page'])"
+                    },
+                    "exact_match": {
+                        "type": "boolean",
+                        "description": "Whether to require exact title match (default: false for fuzzy search)",
+                        "default": False
+                    }
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="refresh-notion-cache",
+            description="Force refresh the Notion page mapping cache",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
     ]
 
 @server.call_tool()
@@ -463,6 +506,9 @@ async def handle_call_tool(
                 if blocks:
                     notion.blocks.children.append(block_id=page_id, children=blocks)
                 
+                # Refresh cache after update
+                await page_mapper.refresh_cache()
+                
                 page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
                 return [types.TextContent(type="text", text=f"Successfully updated page '{title}' at {page_url}")]
             
@@ -486,12 +532,138 @@ async def handle_call_tool(
                     children=blocks
                 )
                 
+                # Refresh cache after creation
+                await page_mapper.refresh_cache()
+                
                 new_page_id = new_page["id"]
                 page_url = f"https://www.notion.so/{new_page_id.replace('-', '')}"
                 return [types.TextContent(type="text", text=f"Successfully created new page '{title}' at {page_url}")]
         
         except APIResponseError as e:
             return [types.TextContent(type="text", text=f"Error writing to Notion: {e}")]
+    
+    elif name == "list-notion-pages":
+        show_hierarchy = arguments.get("show_hierarchy", True)
+        include_archived = arguments.get("include_archived", False)
+        max_depth = arguments.get("max_depth")
+        
+        try:
+            all_pages = await page_mapper.get_all_pages()
+            
+            # Filter pages
+            filtered_pages = []
+            for page in all_pages.values():
+                if not include_archived and page.archived:
+                    continue
+                if max_depth is not None and page.depth > max_depth:
+                    continue
+                filtered_pages.append(page)
+            
+            # Sort by path for hierarchical display
+            filtered_pages.sort(key=lambda p: (p.depth, p.path))
+            
+            if show_hierarchy:
+                # Display with hierarchical indentation
+                lines = []
+                for page in filtered_pages:
+                    indent = "  " * page.depth
+                    status = " (archived)" if page.archived else ""
+                    path_str = " > ".join(page.path) if len(page.path) > 1 else page.title
+                    lines.append(f"{indent}• {page.title}{status}")
+                    lines.append(f"{indent}  ID: {page.id}")
+                    lines.append(f"{indent}  Path: {path_str}")
+                    lines.append(f"{indent}  URL: {page.url}")
+                    lines.append("")
+                
+                result_text = f"Found {len(filtered_pages)} pages in your Notion workspace:\n\n" + "\n".join(lines)
+            else:
+                # Simple list format
+                lines = []
+                for page in filtered_pages:
+                    status = " (archived)" if page.archived else ""
+                    lines.append(f"• {page.title}{status} - {page.id}")
+                
+                result_text = f"Found {len(filtered_pages)} pages:\n\n" + "\n".join(lines)
+            
+            return [types.TextContent(type="text", text=result_text)]
+            
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"Error listing pages: {e}")]
+    
+    elif name == "find-notion-page":
+        title = arguments.get("title")
+        path = arguments.get("path")
+        exact_match = arguments.get("exact_match", False)
+        
+        if not title and not path:
+            raise ValueError("Either title or path must be provided")
+        
+        try:
+            found_pages = []
+            
+            if path:
+                # Search by path
+                found_pages = await page_mapper.find_pages_by_path(path)
+            elif title:
+                # Search by title
+                if exact_match:
+                    page = await page_mapper.find_page_by_title(title, exact_match=True)
+                    if page:
+                        found_pages = [page]
+                else:
+                    # Use the synchronous search for fuzzy matching
+                    await page_mapper.get_all_pages()  # Ensure cache is loaded
+                    found_pages = page_mapper.search_pages_by_title(title, limit=10)
+            
+            if not found_pages:
+                search_term = f"path {path}" if path else f"title '{title}'"
+                return [types.TextContent(type="text", text=f"No pages found matching {search_term}")]
+            
+            # Format results
+            lines = []
+            for page in found_pages:
+                status = " (archived)" if page.archived else ""
+                path_str = " > ".join(page.path)
+                lines.append(f"• {page.title}{status}")
+                lines.append(f"  ID: {page.id}")
+                lines.append(f"  Path: {path_str}")
+                lines.append(f"  URL: {page.url}")
+                lines.append(f"  Depth: {page.depth}")
+                lines.append("")
+            
+            result_text = f"Found {len(found_pages)} matching page(s):\n\n" + "\n".join(lines)
+            return [types.TextContent(type="text", text=result_text)]
+            
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"Error finding page: {e}")]
+    
+    elif name == "refresh-notion-cache":
+        try:
+            await page_mapper.refresh_cache()
+            hierarchy_info = await page_mapper.get_page_hierarchy_info()
+            
+            result_text = f"""Cache refreshed successfully!
+
+Workspace Summary:
+• Total pages: {hierarchy_info['total_pages']}
+• Top-level pages: {hierarchy_info['top_level_pages']}
+• Maximum depth: {hierarchy_info['max_depth']}
+• Archived pages: {hierarchy_info['archived_pages']}
+
+Pages by depth:"""
+            
+            for depth, count in hierarchy_info['pages_by_depth'].items():
+                result_text += f"\n• Depth {depth}: {count} pages"
+            
+            if hierarchy_info['sample_paths']:
+                result_text += "\n\nSample page paths:"
+                for sample in hierarchy_info['sample_paths']:
+                    result_text += f"\n• {sample['path']} (depth {sample['depth']})"
+            
+            return [types.TextContent(type="text", text=result_text)]
+            
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"Error refreshing cache: {e}")]
     
     else:
         raise ValueError(f"Unknown tool: {name}")
