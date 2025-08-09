@@ -26,8 +26,8 @@ dependencies = [
 notion-mcp-server = "notion_mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/notion-mcp-server"
-Repository = "https://github.com/yourusername/notion-mcp-server"
+Homepage = "https://github.com/alecgrater/notion-mcp-server"
+Repository = "https://github.com/alecgrater/notion-mcp-server"
 
 [build-system]
 requires = ["hatchling"]
