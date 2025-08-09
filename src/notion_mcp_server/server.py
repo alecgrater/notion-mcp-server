@@ -85,6 +85,11 @@ async def handle_read_resource(uri: AnyUrl) -> str:
     
     page_id = path_parts[1]
     
+    # Ensure page_id has proper UUID format with dashes
+    if len(page_id) == 32 and "-" not in page_id:
+        # Convert from 32-char string to UUID format
+        page_id = f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:]}"
+    
     try:
         # Get page content
         page = notion.pages.retrieve(page_id)
@@ -160,6 +165,108 @@ def _extract_rich_text(rich_text_array: List[Dict[str, Any]]) -> str:
     """
     return "".join([rt.get("plain_text", "") for rt in rich_text_array])
 
+def _markdown_to_notion_blocks(content: str) -> List[Dict[str, Any]]:
+    """
+    Convert markdown content to Notion blocks.
+    This is a simplified converter that handles basic markdown elements.
+    """
+    blocks = []
+    lines = content.split('\n')
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        if not line:
+            # Skip empty lines
+            i += 1
+            continue
+        
+        # Headers
+        if line.startswith('### '):
+            blocks.append({
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {
+                    "rich_text": [{"type": "text", "text": {"content": line[4:]}}]
+                }
+            })
+        elif line.startswith('## '):
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": line[3:]}}]
+                }
+            })
+        elif line.startswith('# '):
+            blocks.append({
+                "object": "block",
+                "type": "heading_1",
+                "heading_1": {
+                    "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                }
+            })
+        # Bulleted list
+        elif line.startswith('- ') or line.startswith('* '):
+            blocks.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                }
+            })
+        # Numbered list
+        elif line.startswith(('1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. ', '8. ', '9. ')):
+            blocks.append({
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {
+                    "rich_text": [{"type": "text", "text": {"content": line[3:]}}]
+                }
+            })
+        # Code block
+        elif line.startswith('```'):
+            # Find the end of the code block
+            language = line[3:].strip() if len(line) > 3 else ""
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith('```'):
+                code_lines.append(lines[i])
+                i += 1
+            
+            code_content = '\n'.join(code_lines)
+            blocks.append({
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": [{"type": "text", "text": {"content": code_content}}],
+                    "language": language if language else "plain text"
+                }
+            })
+        # Quote
+        elif line.startswith('> '):
+            blocks.append({
+                "object": "block",
+                "type": "quote",
+                "quote": {
+                    "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                }
+            })
+        # Regular paragraph
+        else:
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": line}}]
+                }
+            })
+        
+        i += 1
+    
+    return blocks
+
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     """
@@ -185,6 +292,32 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["question"],
+            },
+        ),
+        types.Tool(
+            name="write-to-notion",
+            description="Create a new page or update an existing page in your Notion workspace",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the page to create or update"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the page (supports markdown formatting)"
+                    },
+                    "parent_page_id": {
+                        "type": "string",
+                        "description": "Optional: ID of parent page to create the new page under. If not provided, creates a top-level page"
+                    },
+                    "page_id": {
+                        "type": "string",
+                        "description": "Optional: ID of existing page to update. If provided, updates this page instead of creating a new one"
+                    }
+                },
+                "required": ["title", "content"],
             },
         ),
     ]
@@ -289,6 +422,76 @@ async def handle_call_tool(
             
         except APIResponseError as e:
             return [types.TextContent(type="text", text=f"Error searching Notion: {e}")]
+    
+    elif name == "write-to-notion":
+        title = arguments.get("title")
+        content = arguments.get("content")
+        parent_page_id = arguments.get("parent_page_id")
+        page_id = arguments.get("page_id")
+        
+        if not title:
+            raise ValueError("Missing title")
+        if not content:
+            raise ValueError("Missing content")
+        
+        try:
+            # Convert markdown content to Notion blocks
+            blocks = _markdown_to_notion_blocks(content)
+            
+            if page_id:
+                # Update existing page
+                # Ensure page_id has proper UUID format with dashes
+                if len(page_id) == 32 and "-" not in page_id:
+                    page_id = f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:]}"
+                
+                # Update page title
+                notion.pages.update(
+                    page_id=page_id,
+                    properties={
+                        "title": {
+                            "title": [{"type": "text", "text": {"content": title}}]
+                        }
+                    }
+                )
+                
+                # Clear existing content and add new blocks
+                existing_blocks = notion.blocks.children.list(block_id=page_id)
+                for block in existing_blocks.get("results", []):
+                    notion.blocks.delete(block_id=block["id"])
+                
+                # Add new blocks
+                if blocks:
+                    notion.blocks.children.append(block_id=page_id, children=blocks)
+                
+                page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+                return [types.TextContent(type="text", text=f"Successfully updated page '{title}' at {page_url}")]
+            
+            else:
+                # Create new page
+                parent = {"workspace": True}
+                if parent_page_id:
+                    # Ensure parent_page_id has proper UUID format with dashes
+                    if len(parent_page_id) == 32 and "-" not in parent_page_id:
+                        parent_page_id = f"{parent_page_id[:8]}-{parent_page_id[8:12]}-{parent_page_id[12:16]}-{parent_page_id[16:20]}-{parent_page_id[20:]}"
+                    parent = {"page_id": parent_page_id}
+                
+                # Create the page
+                new_page = notion.pages.create(
+                    parent=parent,
+                    properties={
+                        "title": {
+                            "title": [{"type": "text", "text": {"content": title}}]
+                        }
+                    },
+                    children=blocks
+                )
+                
+                new_page_id = new_page["id"]
+                page_url = f"https://www.notion.so/{new_page_id.replace('-', '')}"
+                return [types.TextContent(type="text", text=f"Successfully created new page '{title}' at {page_url}")]
+        
+        except APIResponseError as e:
+            return [types.TextContent(type="text", text=f"Error writing to Notion: {e}")]
     
     else:
         raise ValueError(f"Unknown tool: {name}")
