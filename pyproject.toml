@@ -1,0 +1,56 @@
+[project]
+name = "notion-mcp-server"
+version = "0.1.0"
+description = "A Model Context Protocol server for accessing and searching Notion content"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Alec Grater", email = "alecgrater@gmail.com" }]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "notion-client>=2.2.1",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+notion-mcp-server = "notion_mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/notion-mcp-server"
+Repository = "https://github.com/yourusername/notion-mcp-server"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pyright>=1.1.389", 
+    "ruff>=0.7.4",
+    "pytest>=7.0.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = []
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+pythonVersion = "3.10"
