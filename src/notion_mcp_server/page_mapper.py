@@ -221,10 +221,15 @@ class NotionPageMapper:
             page_id = result["id"]
             object_type = result.get("object", "page")
             
-            # Extract title
+            # Extract title - handle both pages and databases
             title = "Untitled"
-            if result.get("properties"):
-                # Look for title property
+            
+            # For databases, title is often at the root level
+            if object_type == "database" and result.get("title"):
+                title_parts = [t.get("plain_text", "") for t in result["title"]]
+                title = "".join(title_parts).strip() or "Untitled"
+            elif result.get("properties"):
+                # For pages, look for title property in properties
                 for prop_name, prop_data in result["properties"].items():
                     if prop_data.get("type") == "title" and prop_data.get("title"):
                         title_parts = [t.get("plain_text", "") for t in prop_data["title"]]
@@ -279,7 +284,7 @@ class NotionPageMapper:
         visited: Set[str] = set()
         queue: List[str] = []
         
-        # Start with top-level pages
+        # Start with top-level pages (workspace pages)
         for page in self._page_map.values():
             if page.parent_type == "workspace":
                 page.path = [page.title]
@@ -287,7 +292,7 @@ class NotionPageMapper:
                 queue.append(page.id)
                 visited.add(page.id)
         
-        # BFS to build hierarchy
+        # BFS to build hierarchy for connected pages
         while queue:
             current_id = queue.pop(0)
             current_page = self._page_map[current_id]
@@ -299,6 +304,47 @@ class NotionPageMapper:
                     child_page.depth = current_page.depth + 1
                     queue.append(child_id)
                     visited.add(child_id)
+        
+        # Filter out orphaned pages that don't belong in the main hierarchy
+        # Only keep pages that are legitimate workspace pages or connected to the main hierarchy
+        orphaned_pages = []
+        for page in self._page_map.values():
+            if page.id not in visited:
+                # Only keep pages that are legitimate workspace pages (like "Work")
+                # Filter out standalone pages that aren't connected to the main hierarchy
+                if page.parent_type == "workspace" and page.parent_id is None:
+                    # This could be a legitimate top-level page like "Work"
+                    page.path = [page.title]
+                    page.depth = 0
+                    visited.add(page.id)
+                else:
+                    # This is an orphaned page that should be removed
+                    orphaned_pages.append(page.id)
+        
+        # Remove orphaned pages and their descendants from the page map
+        pages_to_remove = set()
+        
+        def collect_descendants(page_id: str):
+            """Recursively collect all descendants of a page."""
+            if page_id in self._page_map:
+                pages_to_remove.add(page_id)
+                page = self._page_map[page_id]
+                for child_id in page.children:
+                    collect_descendants(child_id)
+        
+        # Collect all orphaned pages and their descendants
+        for orphaned_id in orphaned_pages:
+            collect_descendants(orphaned_id)
+        
+        # Remove orphaned pages from the page map and title index
+        for page_id in pages_to_remove:
+            if page_id in self._page_map:
+                page = self._page_map[page_id]
+                # Remove from title index
+                if page.title in self._title_to_id and self._title_to_id[page.title] == page_id:
+                    del self._title_to_id[page.title]
+                # Remove from page map
+                del self._page_map[page_id]
     
     def _is_cache_valid(self) -> bool:
         """Check if the current cache is still valid."""

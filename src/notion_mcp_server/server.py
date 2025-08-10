@@ -13,6 +13,7 @@ from notion_client.errors import APIResponseError
 from dotenv import load_dotenv
 
 from .page_mapper import NotionPageMapper
+from .enhanced_search import EnhancedNotionSearch
 
 # Load environment variables
 load_dotenv()
@@ -24,8 +25,9 @@ if not notion_token:
 
 notion = Client(auth=notion_token)
 
-# Initialize page mapper
+# Initialize page mapper and enhanced search
 page_mapper = NotionPageMapper(notion)
+enhanced_search = EnhancedNotionSearch(notion, page_mapper)
 
 server = Server("notion-mcp-server")
 
@@ -260,7 +262,7 @@ async def handle_list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="ask-notion",
-            description="Ask a question and get relevant information from your entire Notion workspace",
+            description="Ask a question, fetch any relevant information from your entire Notion workspace, and have the question answered using those contents (and natural language processing by the LLM)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -274,6 +276,11 @@ async def handle_list_tools() -> list[types.Tool]:
                         "default": 5,
                         "minimum": 1,
                         "maximum": 10
+                    },
+                    "use_enhanced_search": {
+                        "type": "boolean",
+                        "description": "Use enhanced search with multiple strategies and relevance ranking (default: true)",
+                        "default": True
                     }
                 },
                 "required": ["question"],
@@ -378,90 +385,142 @@ async def handle_call_tool(
     if name == "ask-notion":
         question = arguments.get("question")
         max_content_pages = arguments.get("max_content_pages", 5)
+        use_enhanced_search = arguments.get("use_enhanced_search", True)
         
         if not question:
             raise ValueError("Missing question")
         
         try:
-            # Search through entire Notion workspace - we'll paginate through all results
-            all_results = []
-            has_more = True
-            start_cursor = None
-            
-            while has_more:
-                search_params = {
-                    "query": question,
-                    "page_size": 100  # Max allowed by Notion API
-                }
-                if start_cursor:
-                    search_params["start_cursor"] = start_cursor
+            if use_enhanced_search:
+                # Use enhanced search with multiple strategies
+                search_results = await enhanced_search.search(question, max_content_pages)
                 
-                search_response = notion.search(**search_params)
-                all_results.extend(search_response.get("results", []))
+                if not search_results:
+                    return [types.TextContent(type="text", text=f"No relevant information found in your Notion workspace for: '{question}'")]
                 
-                has_more = search_response.get("has_more", False)
-                start_cursor = search_response.get("next_cursor")
-            
-            if not all_results:
-                return [types.TextContent(type="text", text=f"No relevant information found in your Notion workspace for: '{question}'")]
-            
-            # Get full content from the most relevant pages (limited by max_content_pages)
-            relevant_content = []
-            sources = []
-            
-            for i, result in enumerate(all_results[:max_content_pages]):
-                page_id = result["id"]
+                # Format enhanced search results
+                relevant_content = []
+                sources = []
                 
-                # Get page title
-                title = "Untitled"
-                if result.get("properties"):
-                    for prop_name, prop_data in result["properties"].items():
-                        if prop_data.get("type") == "title" and prop_data.get("title"):
-                            title_parts = [t.get("plain_text", "") for t in prop_data["title"]]
-                            title = "".join(title_parts) or "Untitled"
-                            break
-                
-                # Get page URL
-                page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
-                
-                # Get full page content
-                try:
-                    blocks = notion.blocks.children.list(block_id=page_id)
-                    content_parts = []
+                for result in search_results:
+                    page = result.page
                     
-                    for block in blocks.get("results", []):
-                        block_text = _format_block(block)
-                        if block_text.strip():
-                            content_parts.append(block_text.strip())
-                    
-                    page_content = "\n".join(content_parts)
+                    # Get full page content if not already in preview
+                    page_content = result.content_preview
+                    if not page_content or not page_content.strip():
+                        try:
+                            blocks = notion.blocks.children.list(block_id=page.id)
+                            content_parts = []
+                            
+                            for block in blocks.get("results", []):
+                                block_text = _format_block(block)
+                                if block_text.strip():
+                                    content_parts.append(block_text.strip())
+                            
+                            page_content = "\n".join(content_parts)
+                            if not page_content.strip():
+                                page_content = "No readable content found in this page"
+                        except Exception as e:
+                            print(f"Error reading page {page.id}: {e}")
+                            page_content = f"Content unavailable (Error: {str(e)})"
                     
                     if page_content.strip():
-                        relevant_content.append(f"## From: {title}\n\n{page_content}")
-                        sources.append(f"- [{title}]({page_url})")
+                        match_info = f" ({', '.join(result.match_reasons)})" if result.match_reasons else ""
+                        relevance_info = f" [Relevance: {result.relevance_score:.2f}]" if result.relevance_score > 0 else ""
+                        
+                        relevant_content.append(f"## From: {page.title}{match_info}{relevance_info}\n\n{page_content}")
+                        sources.append(f"- [{page.title}]({page.url})")
                 
-                except Exception as e:
-                    print(f"Error reading page {page_id}: {e}")
-                    continue
+                # Combine all relevant content
+                combined_content = "\n\n---\n\n".join(relevant_content)
+                
+                # Add sources at the end
+                sources_section = "\n\n## Sources\n\n" + "\n".join(sources)
+                
+                response_text = f"Based on your Notion workspace, here's what I found regarding: **{question}**\n\n{combined_content}{sources_section}"
+                
+                return [types.TextContent(type="text", text=response_text)]
             
-            # Add information about additional results if there are more
-            additional_results_info = ""
-            if len(all_results) > max_content_pages:
-                additional_count = len(all_results) - max_content_pages
-                additional_results_info = f"\n\n*Note: Found {len(all_results)} total matching pages. Showing detailed content from the top {max_content_pages} most relevant pages. {additional_count} additional pages also matched your query.*"
-            
-            if not relevant_content:
-                return [types.TextContent(type="text", text=f"Found {len(all_results)} matching pages, but couldn't retrieve readable content from them for: '{question}'")]
-            
-            # Combine all relevant content
-            combined_content = "\n\n---\n\n".join(relevant_content)
-            
-            # Add sources at the end
-            sources_section = "\n\n## Sources\n\n" + "\n".join(sources)
-            
-            response_text = f"Based on your Notion workspace, here's what I found regarding: **{question}**\n\n{combined_content}{sources_section}{additional_results_info}"
-            
-            return [types.TextContent(type="text", text=response_text)]
+            else:
+                # Use original search method as fallback
+                all_results = []
+                has_more = True
+                start_cursor = None
+                
+                while has_more:
+                    search_params = {
+                        "query": question,
+                        "page_size": 100  # Max allowed by Notion API
+                    }
+                    if start_cursor:
+                        search_params["start_cursor"] = start_cursor
+                    
+                    search_response = notion.search(**search_params)
+                    all_results.extend(search_response.get("results", []))
+                    
+                    has_more = search_response.get("has_more", False)
+                    start_cursor = search_response.get("next_cursor")
+                
+                if not all_results:
+                    return [types.TextContent(type="text", text=f"No relevant information found in your Notion workspace for: '{question}'")]
+                
+                # Get full content from the most relevant pages (limited by max_content_pages)
+                relevant_content = []
+                sources = []
+                
+                for i, result in enumerate(all_results[:max_content_pages]):
+                    page_id = result["id"]
+                    
+                    # Get page title
+                    title = "Untitled"
+                    if result.get("properties"):
+                        for prop_name, prop_data in result["properties"].items():
+                            if prop_data.get("type") == "title" and prop_data.get("title"):
+                                title_parts = [t.get("plain_text", "") for t in prop_data["title"]]
+                                title = "".join(title_parts) or "Untitled"
+                                break
+                    
+                    # Get page URL
+                    page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+                    
+                    # Get full page content
+                    try:
+                        blocks = notion.blocks.children.list(block_id=page_id)
+                        content_parts = []
+                        
+                        for block in blocks.get("results", []):
+                            block_text = _format_block(block)
+                            if block_text.strip():
+                                content_parts.append(block_text.strip())
+                        
+                        page_content = "\n".join(content_parts)
+                        
+                        if page_content.strip():
+                            relevant_content.append(f"## From: {title}\n\n{page_content}")
+                            sources.append(f"- [{title}]({page_url})")
+                    
+                    except Exception as e:
+                        print(f"Error reading page {page_id}: {e}")
+                        continue
+                
+                # Add information about additional results if there are more
+                additional_results_info = ""
+                if len(all_results) > max_content_pages:
+                    additional_count = len(all_results) - max_content_pages
+                    additional_results_info = f"\n\n*Note: Found {len(all_results)} total matching pages. Showing detailed content from the top {max_content_pages} most relevant pages. {additional_count} additional pages also matched your query.*"
+                
+                if not relevant_content:
+                    return [types.TextContent(type="text", text=f"Found {len(all_results)} matching pages, but couldn't retrieve readable content from them for: '{question}'")]
+                
+                # Combine all relevant content
+                combined_content = "\n\n---\n\n".join(relevant_content)
+                
+                # Add sources at the end
+                sources_section = "\n\n## Sources\n\n" + "\n".join(sources)
+                
+                response_text = f"Based on your Notion workspace, here's what I found regarding: **{question}**\n\n{combined_content}{sources_section}{additional_results_info}"
+                
+                return [types.TextContent(type="text", text=response_text)]
             
         except APIResponseError as e:
             return [types.TextContent(type="text", text=f"Error searching Notion: {e}")]
